@@ -1,0 +1,4 @@
+com.gym.app.test.app-androidTest-0 D:\Soft\claudeCode\GymApp\app\build\generated\res\resValues\androidTest\debug
+com.gym.app.test.app-mergeDebugAndroidTestResources-1 D:\Soft\claudeCode\GymApp\app\build\intermediates\incremental\debugAndroidTest\mergeDebugAndroidTestResources\merged.dir
+com.gym.app.test.app-mergeDebugAndroidTestResources-2 D:\Soft\claudeCode\GymApp\app\build\intermediates\incremental\debugAndroidTest\mergeDebugAndroidTestResources\stripped.dir
+com.gym.app.test.app-merged_res-3 D:\Soft\claudeCode\GymApp\app\build\intermediates\merged_res\debugAndroidTest

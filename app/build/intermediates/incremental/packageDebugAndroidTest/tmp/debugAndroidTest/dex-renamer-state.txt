@@ -1,0 +1,4 @@
+#Fri May 15 13:08:53 MSK 2026
+base.0=D\:\\Soft\\claudeCode\\GymApp\\app\\build\\intermediates\\dex\\debugAndroidTest\\mergeProjectDexDebugAndroidTest\\0\\classes.dex
+path.0=0/classes.dex
+renamed.0=classes.dex
