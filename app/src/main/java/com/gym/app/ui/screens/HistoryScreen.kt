@@ -1,6 +1,8 @@
 package com.gym.app.ui.screens
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -9,6 +11,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -28,6 +31,7 @@ fun HistoryScreen(
     val history by database.workoutHistoryDao().getAllHistory().collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     var showDeleteDialog by remember { mutableStateOf<WorkoutHistory?>(null) }
+    var selectedPeriod by remember { mutableStateOf(0) }
 
     Scaffold(
         topBar = {
@@ -46,47 +50,41 @@ fun HistoryScreen(
             )
         }
     ) { paddingValues ->
-        if (history.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        text = "📊",
-                        fontSize = 64.sp
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "История пуста",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Завершите первую тренировку,\nчтобы увидеть её здесь!",
-                        textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+        Column(modifier = Modifier.fillMaxSize().padding(paddingValues).padding(12.dp)) {
+            // «Все» показывает записи; остальные вкладки — сумму за скользящий период.
+            Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf("Все", "30 дней", "Год", "∞").forEachIndexed { index, label ->
+                    FilterChip(
+                        selected = selectedPeriod == index,
+                        onClick = { selectedPeriod = index },
+                        label = { Text(label, maxLines = 1) }
                     )
                 }
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(history) { workout ->
-                    HistoryCard(
-                        workout = workout,
-                        onDelete = { showDeleteDialog = workout }
-                    )
+            if (selectedPeriod == 0) {
+                if (history.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("История пуста. Завершите первую тренировку!", textAlign = TextAlign.Center)
+                    }
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(history, key = { it.id }) { workout ->
+                            HistoryCard(workout = workout, onDelete = { showDeleteDialog = workout })
+                        }
+                    }
+                }
+            } else {
+                val now = System.currentTimeMillis()
+                val days = when (selectedPeriod) { 1 -> 30L; 2 -> 365L; else -> null }
+                val filtered = history.filter { it.completedAt <= now &&
+                    (days == null || it.completedAt >= now - days * 24L * 60 * 60 * 1000) }
+                Card(modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Тренировок: ${filtered.size}", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Общее время: ${formatTime(filtered.sumOf { it.totalDuration })}", fontSize = 18.sp)
+                    }
                 }
             }
         }
@@ -202,12 +200,12 @@ fun HistoryCard(
 
                 Column {
                     Text(
-                        text = "Упражнений",
+                        text = "Подходов",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        text = "${workout.exercises.size}",
+                        text = "${workout.completedSets.size}",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.tertiary
@@ -230,27 +228,41 @@ fun HistoryCard(
 
             if (expanded) {
                 Divider(modifier = Modifier.padding(vertical = 8.dp))
-                workout.exercises.forEach { exercise ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = exercise.name,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            text = "${exercise.reps} × ${exercise.weight} кг",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                // В истории показываем фактически запущенные подходы, а не план тренировки.
+                workout.exercises.forEachIndexed { index, exercise ->
+                    val sets = workout.completedSets.filter { it.exerciseIndex == index }
+                    val tonnage = sets.sumOf { it.weight * it.reps }
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(exercise.name, modifier = Modifier.weight(1f), fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium)
+                        Text("${sets.size} подх. • ${String.format("%.1f", tonnage)} кг", fontSize = 14.sp)
                     }
                 }
+                val expected = workout.completedSets.sumOf { it.duration }
+                val minimum = workout.completedSets.size * 120_000L
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("Подходов выполнено: ${workout.completedSets.size}")
+                Text("Ожидаемое время: ${formatTime(expected)}")
+                Text("Минимальное возможное время\nпри 2-минутном подходе: ${formatTime(minimum)}")
+                Text("Твоё время", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
+                TimeDifference("ОВ", workout.totalDuration - expected)
+                TimeDifference("2 мин", workout.totalDuration - minimum)
+
             }
         }
     }
+}
+
+
+// Разница выводится со знаком: быстрее ориентира — зелёным, медленнее — красным.
+@Composable
+private fun TimeDifference(label: String, difference: Long) {
+    val sign = if (difference < 0) "−" else if (difference > 0) "+" else ""
+    val color = when {
+        difference < 0 -> Color(0xFF2E7D32)
+        difference > 0 -> Color(0xFFC62828)
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    Text("$label: $sign${formatTime(kotlin.math.abs(difference))}", color = color)
 }

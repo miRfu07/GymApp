@@ -1,5 +1,6 @@
 package com.gym.app.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -15,6 +16,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -41,7 +45,51 @@ fun StartWorkoutScreen(
     var showCountdown by remember { mutableStateOf(false) }
     var countdownNumber by remember { mutableStateOf(3) }
     var showExitDialog by remember { mutableStateOf(false) }
+    var isSaving by remember { mutableStateOf(false) }
+    var saveError by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+
+    // Один способ сохранения для кнопки завершения и системной стрелки назад.
+    // Запущенные подходы закрываются в момент окончания тренировки, остальные не учитываются.
+    fun finishWorkout(showCelebration: Boolean) {
+        val workout = selectedWorkout ?: return
+        if (!isWorkoutActive || isSaving) return
+        isSaving = true
+        val finishedAt = System.currentTimeMillis()
+        val completedSets = exerciseTimers.map { timer ->
+            val exercise = workout.exercises[timer.exerciseId.toInt()]
+            val reps = exercise.reps.replace("х", "x").replace("*", "x")
+                .split("x").getOrNull(1)?.toIntOrNull() ?: 0
+            CompletedSet(
+                exerciseIndex = timer.exerciseId.toInt(), exerciseName = timer.exerciseName,
+                setNumber = timer.setNumber,
+                weight = Exercise.getWeightForSet(exercise.weight, timer.setNumber, Exercise.getSetsCount(exercise.reps)),
+                reps = reps, duration = ((timer.endTime ?: finishedAt) - timer.startTime).coerceAtLeast(0L)
+            )
+        }
+        scope.launch {
+            try {
+                database.workoutHistoryDao().insertHistory(WorkoutHistory(
+                    workoutName = workout.name, exercises = workout.exercises,
+                    completedSets = completedSets,
+                    totalTonnage = completedSets.sumOf { it.weight * it.reps },
+                    totalDuration = (finishedAt - workoutStartTime).coerceAtLeast(0L)
+                ))
+                isWorkoutActive = false
+                if (showCelebration) showCompletionDialog = true else onNavigateBack()
+            } catch (error: Exception) {
+                // Ошибка записи не должна незаметно уничтожать тренировку.
+                saveError = true
+            } finally {
+                isSaving = false
+            }
+        }
+    }
+
+    // Аппаратная кнопка Android должна вести себя так же, как стрелка на экране.
+    BackHandler(enabled = isWorkoutActive || showMotivationText || showCountdown) {
+        if (isWorkoutActive && !isSaving) showExitDialog = true
+    }
 
     LaunchedEffect(isWorkoutActive) {
         if (isWorkoutActive) {
@@ -78,7 +126,7 @@ fun StartWorkoutScreen(
                 navigationIcon = {
                     IconButton(onClick = {
                         if (isWorkoutActive) {
-                            showExitDialog = true
+                            if (!isSaving) showExitDialog = true
                         } else {
                             onNavigateBack()
                         }
@@ -104,9 +152,10 @@ fun StartWorkoutScreen(
             ) {
                 Text(
                     text = "Выберите тренировку",
+                    textAlign = TextAlign.Center,
                     fontSize = 24.sp,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(bottom = 16.dp)
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
                 )
 
                 if (workouts.isEmpty()) {
@@ -185,30 +234,23 @@ fun StartWorkoutScreen(
                                 exercise = exercise,
                                 exerciseIndex = exerciseIndex,
                                 exerciseTimers = exerciseTimers,
-                                onStartExercise = { setNumber ->
-                                    // Остановить все активные таймеры (включая другие упражнения)
+                                onStartExercise = { _ ->
+                                    val now = System.currentTimeMillis()
+                                    val exerciseId = exerciseIndex.toLong()
+                                    // Останавливаем только таймер этого упражнения; другие продолжают идти.
                                     exerciseTimers = exerciseTimers.map {
-                                        if (it.isRunning) {
-                                            it.copy(
-                                                endTime = System.currentTimeMillis(),
-                                                isRunning = false
-                                            )
-                                        } else it
+                                        if (it.exerciseId == exerciseId && it.isRunning)
+                                            it.copy(endTime = now, isRunning = false) else it
                                     }
-
-                                    // Создать новый таймер только если его еще нет
-                                    val timerExists = exerciseTimers.any {
-                                        it.exerciseId == exerciseIndex.toLong() && it.setNumber == setNumber
+                                    // Любая нажатая незапущенная кнопка запускает первый пропущенный подход.
+                                    val nextSet = (1..Exercise.getSetsCount(exercise.reps)).firstOrNull { number ->
+                                        exerciseTimers.none { it.exerciseId == exerciseId && it.setNumber == number }
                                     }
-
-                                    if (!timerExists) {
-                                        val newTimer = ExerciseTimer(
-                                            exerciseId = exerciseIndex.toLong(),
-                                            exerciseName = exercise.name,
-                                            setNumber = setNumber,
-                                            startTime = System.currentTimeMillis()
+                                    if (nextSet != null) {
+                                        exerciseTimers = exerciseTimers + ExerciseTimer(
+                                            exerciseId = exerciseId, exerciseName = exercise.name,
+                                            setNumber = nextSet, startTime = now
                                         )
-                                        exerciseTimers = exerciseTimers + newTimer
                                     }
                                 },
                                 onStopExercise = { timer ->
@@ -229,45 +271,8 @@ fun StartWorkoutScreen(
 
                     // Кнопка завершения тренировки
                     Button(
-                        onClick = {
-                            isWorkoutActive = false
-
-                            // Собираем только выполненные подходы
-                            val completedSets = exerciseTimers
-                                .filter { !it.isRunning && it.endTime != null }
-                                .map { timer ->
-                                    val exercise = workout.exercises[timer.exerciseId.toInt()]
-                                    val setsCount = Exercise.getSetsCount(exercise.reps)
-                                    val repsPerSet = exercise.reps.replace("х", "x").replace("*", "x")
-                                        .split("x").getOrNull(1)?.toIntOrNull() ?: 0
-                                    val weight = Exercise.getWeightForSet(exercise.weight, timer.setNumber, setsCount)
-
-                                    CompletedSet(
-                                        exerciseIndex = timer.exerciseId.toInt(),
-                                        exerciseName = timer.exerciseName,
-                                        setNumber = timer.setNumber,
-                                        weight = weight,
-                                        reps = repsPerSet,
-                                        duration = (timer.endTime!! - timer.startTime)
-                                    )
-                                }
-
-                            // Считаем реальный тоннаж только по выполненным подходам
-                            val totalTonnage = completedSets.sumOf { it.weight * it.reps }
-
-                            scope.launch {
-                                database.workoutHistoryDao().insertHistory(
-                                    WorkoutHistory(
-                                        workoutName = workout.name,
-                                        exercises = workout.exercises,
-                                        completedSets = completedSets,
-                                        totalTonnage = totalTonnage,
-                                        totalDuration = workoutElapsedTime
-                                    )
-                                )
-                                showCompletionDialog = true
-                            }
-                        },
+                        onClick = { finishWorkout(showCelebration = true) },
+                        enabled = !isSaving,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(56.dp),
@@ -282,6 +287,13 @@ fun StartWorkoutScreen(
                 }
             }
         }
+    }
+
+    if (saveError) {
+        AlertDialog(onDismissRequest = { saveError = false },
+            title = { Text("Не удалось сохранить тренировку") },
+            text = { Text("Тренировка осталась открытой. Попробуйте завершить её ещё раз.") },
+            confirmButton = { TextButton(onClick = { saveError = false }) { Text("Понятно") } })
     }
 
     if (showCompletionDialog) {
@@ -312,45 +324,7 @@ fun StartWorkoutScreen(
         ExitWorkoutDialog(
             onConfirm = {
                 showExitDialog = false
-                isWorkoutActive = false
-
-                // Собираем только выполненные подходы
-                val completedSets = exerciseTimers
-                    .filter { !it.isRunning && it.endTime != null }
-                    .map { timer ->
-                        val exercise = selectedWorkout!!.exercises[timer.exerciseId.toInt()]
-                        val setsCount = Exercise.getSetsCount(exercise.reps)
-                        val repsPerSet = exercise.reps.replace("х", "x").replace("*", "x")
-                            .split("x").getOrNull(1)?.toIntOrNull() ?: 0
-                        val weight = Exercise.getWeightForSet(exercise.weight, timer.setNumber, setsCount)
-
-                        CompletedSet(
-                            exerciseIndex = timer.exerciseId.toInt(),
-                            exerciseName = timer.exerciseName,
-                            setNumber = timer.setNumber,
-                            weight = weight,
-                            reps = repsPerSet,
-                            duration = (timer.endTime!! - timer.startTime)
-                        )
-                    }
-
-                // Считаем реальный тоннаж только по выполненным подходам
-                val totalTonnage = completedSets.sumOf { it.weight * it.reps }
-
-                scope.launch {
-                    if (completedSets.isNotEmpty()) {
-                        database.workoutHistoryDao().insertHistory(
-                            WorkoutHistory(
-                                workoutName = selectedWorkout!!.name,
-                                exercises = selectedWorkout!!.exercises,
-                                completedSets = completedSets,
-                                totalTonnage = totalTonnage,
-                                totalDuration = workoutElapsedTime
-                            )
-                        )
-                    }
-                    onNavigateBack()
-                }
+                finishWorkout(showCelebration = false)
             },
             onDismiss = {
                 showExitDialog = false
@@ -366,8 +340,8 @@ fun ExitWorkoutDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Прервать тренировку?") },
-        text = { Text("Вы уверены, что хотите прервать тренировку? Прогресс выполненных подходов будет сохранен.") },
+        title = { Text("Вы точно хотите закончить тренировку?") },
+        text = { Text("Тренировка и запущенные подходы сохранятся в истории.") },
         confirmButton = {
             Button(
                 onClick = onConfirm,
@@ -375,12 +349,12 @@ fun ExitWorkoutDialog(
                     containerColor = MaterialTheme.colorScheme.error
                 )
             ) {
-                Text("Да, прервать")
+                Text("Да")
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("Продолжить")
+                Text("Нет")
             }
         }
     )
@@ -400,10 +374,12 @@ fun WorkoutSelectionCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = workout.name,
+                textAlign = TextAlign.Center,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -423,9 +399,10 @@ fun WorkoutSelectionCard(
             workout.exercises.forEach { exercise ->
                 Text(
                     text = "• ${exercise.name}",
+                    textAlign = TextAlign.Center,
                     fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 8.dp, top = 4.dp)
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
                 )
             }
         }
@@ -737,7 +714,10 @@ fun CountdownOverlay(number: Int) {
             fontSize = 200.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary,
+            style = TextStyle(shadow = Shadow(color = Color.Black.copy(alpha = 0.45f),
+                offset = Offset(8f, 10f), blurRadius = 12f)),
             modifier = Modifier.scale(scale.value)
         )
     }
 }
+
